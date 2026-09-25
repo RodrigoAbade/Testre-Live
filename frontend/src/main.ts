@@ -66,21 +66,33 @@ export class AppComponent implements OnDestroy {
   private socket?: WebSocket;
   private peer?: RTCPeerConnection;
   private mediaStream?: MediaStream;
-  private readonly roomPassword = 'troque-esta-senha';
 
   constructor() {
     if (this.unlocked) setTimeout(() => this.connect(), 0);
   }
 
-  unlock(): void {
-    if (this.password !== this.roomPassword) {
+  async unlock(): Promise<void> {
+    try {
+      const response = await fetch('http://localhost:8080/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: this.password })
+      });
+
+      if (!response.ok) {
+        this.loginError = true;
+        return;
+      }
+
+      sessionStorage.setItem('testre-live-auth', 'ok');
+      this.unlocked = true;
+      this.loginError = false;
+      this.password = '';
+      setTimeout(() => this.connect(), 0);
+    } catch {
       this.loginError = true;
-      return;
+      this.message = 'Não foi possível conectar ao backend.';
     }
-    sessionStorage.setItem('testre-live-auth', 'ok');
-    this.unlocked = true;
-    this.loginError = false;
-    setTimeout(() => this.connect(), 0);
   }
 
   private connect(): void {
