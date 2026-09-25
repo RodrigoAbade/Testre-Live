@@ -15,8 +15,9 @@ public class SignalingHandler extends TextWebSocketHandler {
     private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession session) {
+    public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         sessions.add(session);
+        session.sendMessage(new TextMessage("{\"type\":\"connected\",\"id\":\"" + session.getId() + "\"}"));
     }
 
     @Override
@@ -29,7 +30,11 @@ public class SignalingHandler extends TextWebSocketHandler {
     }
 
     @Override
-    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         sessions.remove(session);
+        String disconnected = "{\"type\":\"peer-left\",\"id\":\"" + session.getId() + "\"}";
+        for (WebSocketSession peer : sessions) {
+            if (peer.isOpen()) peer.sendMessage(new TextMessage(disconnected));
+        }
     }
 }
