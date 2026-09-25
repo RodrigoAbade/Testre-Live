@@ -1,71 +1,190 @@
 import { bootstrapApplication } from '@angular/platform-browser';
-import { Component, ElementRef, ViewChild } from '@angular/core';
+import { Component, ElementRef, ViewChild, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+
+type Signal =
+  | { type: 'connected'; id: string }
+  | { type: 'watch' }
+  | { type: 'offer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'answer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'ice'; candidate: RTCIceCandidateInit }
+  | { type: 'stream-stopped' }
+  | { type: 'peer-left'; id: string };
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
     <main class="page">
-      <section class="card">
+      <section class="card" *ngIf="!unlocked">
+        <h1>Testre Live</h1>
+        <p>Área privada da galera</p>
+        <div class="login">
+          <input type="password" [(ngModel)]="password" placeholder="Senha da sala" (keyup.enter)="unlock()">
+          <button (click)="unlock()">Entrar</button>
+        </div>
+        <small *ngIf="loginError">Senha incorreta.</small>
+      </section>
+
+      <section class="card wide" *ngIf="unlocked">
         <div class="topbar">
-          <div>
-            <h1>Testre Live</h1>
-            <p>Stream privada da galera</p>
-          </div>
-          <span class="status" [class.live]="isStreaming">
-            {{ isStreaming ? 'AO VIVO' : 'OFFLINE' }}
-          </span>
+          <div><h1>Testre Live</h1><p>Compartilhamento privado de tela</p></div>
+          <span class="status" [class.live]="isStreaming">{{ isStreaming ? 'AO VIVO' : 'SALA ONLINE' }}</span>
         </div>
 
         <div class="video-shell">
-          <video #preview autoplay playsinline muted></video>
-          <div class="empty" *ngIf="!isStreaming">
-            <strong>Nenhuma transmissão ativa</strong>
-            <span>Compartilhe sua tela para começar.</span>
+          <video #video autoplay playsinline [muted]="isBroadcaster"></video>
+          <div class="empty" *ngIf="!hasVideo">
+            <strong>{{ isBroadcaster ? 'Preparando transmissão...' : 'Aguardando transmissão' }}</strong>
+            <span>Você pode transmitir ou aguardar alguém iniciar.</span>
           </div>
         </div>
 
         <div class="actions">
-          <button (click)="startStream()" [disabled]="isStreaming">
-            Compartilhar tela
-          </button>
-          <button class="secondary" (click)="stopStream()" [disabled]="!isStreaming">
-            Parar transmissão
-          </button>
+          <button (click)="startStream()" [disabled]="isBroadcaster">Compartilhar tela</button>
+          <button class="secondary" (click)="watch()">Assistir stream</button>
+          <button class="danger" (click)="stopStream()" [disabled]="!isBroadcaster">Parar</button>
         </div>
+        <p class="hint">{{ message }}</p>
       </section>
     </main>
   `
 })
-export class AppComponent {
-  @ViewChild('preview') preview!: ElementRef<HTMLVideoElement>;
+export class AppComponent implements OnDestroy {
+  @ViewChild('video') video?: ElementRef<HTMLVideoElement>;
 
+  password = '';
+  unlocked = sessionStorage.getItem('testre-live-auth') === 'ok';
+  loginError = false;
   isStreaming = false;
+  isBroadcaster = false;
+  hasVideo = false;
+  message = 'Conectando ao servidor...';
+
+  private socket?: WebSocket;
+  private peer?: RTCPeerConnection;
   private mediaStream?: MediaStream;
+  private readonly roomPassword = 'troque-esta-senha';
+
+  constructor() {
+    if (this.unlocked) setTimeout(() => this.connect(), 0);
+  }
+
+  unlock(): void {
+    if (this.password !== this.roomPassword) {
+      this.loginError = true;
+      return;
+    }
+    sessionStorage.setItem('testre-live-auth', 'ok');
+    this.unlocked = true;
+    this.loginError = false;
+    setTimeout(() => this.connect(), 0);
+  }
+
+  private connect(): void {
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = location.hostname || 'localhost';
+    this.socket = new WebSocket(`${protocol}://${host}:8080/ws/signaling`);
+    this.socket.onopen = () => this.message = 'Sala conectada.';
+    this.socket.onclose = () => this.message = 'Servidor de sinalização desconectado.';
+    this.socket.onmessage = event => this.handleSignal(JSON.parse(event.data) as Signal);
+  }
+
+  private newPeer(): RTCPeerConnection {
+    this.peer?.close();
+    this.peer = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    this.peer.onicecandidate = event => {
+      if (event.candidate) this.send({ type: 'ice', candidate: event.candidate.toJSON() });
+    };
+    this.peer.ontrack = event => {
+      const stream = event.streams[0];
+      if (this.video && stream) {
+        this.video.nativeElement.srcObject = stream;
+        this.hasVideo = true;
+        this.isStreaming = true;
+        this.message = 'Recebendo transmissão.';
+      }
+    };
+    return this.peer;
+  }
 
   async startStream(): Promise<void> {
-    this.mediaStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: 60
-      },
-      audio: true
-    });
+    try {
+      this.mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 60 },
+        audio: true
+      });
+      this.isBroadcaster = true;
+      this.isStreaming = true;
+      this.hasVideo = true;
+      this.message = 'Transmitindo. Seus amigos podem clicar em Assistir stream.';
+      if (this.video) this.video.nativeElement.srcObject = this.mediaStream;
+      this.mediaStream.getVideoTracks()[0]?.addEventListener('ended', () => this.stopStream());
+    } catch {
+      this.message = 'Compartilhamento cancelado.';
+    }
+  }
 
-    this.preview.nativeElement.srcObject = this.mediaStream;
-    this.isStreaming = true;
+  watch(): void {
+    this.send({ type: 'watch' });
+    this.message = 'Solicitando transmissão...';
+  }
 
-    this.mediaStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-      this.stopStream();
-    });
+  private async handleSignal(signal: Signal): Promise<void> {
+    if (signal.type === 'watch' && this.isBroadcaster && this.mediaStream) {
+      const pc = this.newPeer();
+      this.mediaStream.getTracks().forEach(track => pc.addTrack(track, this.mediaStream!));
+      await pc.setLocalDescription(await pc.createOffer());
+      this.send({ type: 'offer', sdp: pc.localDescription! });
+    } else if (signal.type === 'offer' && !this.isBroadcaster) {
+      const pc = this.newPeer();
+      await pc.setRemoteDescription(signal.sdp);
+      await pc.setLocalDescription(await pc.createAnswer());
+      this.send({ type: 'answer', sdp: pc.localDescription! });
+    } else if (signal.type === 'answer' && this.isBroadcaster && this.peer) {
+      await this.peer.setRemoteDescription(signal.sdp);
+    } else if (signal.type === 'ice' && this.peer) {
+      try { await this.peer.addIceCandidate(signal.candidate); } catch {}
+    } else if (signal.type === 'stream-stopped') {
+      this.clearViewer();
+    }
   }
 
   stopStream(): void {
     this.mediaStream?.getTracks().forEach(track => track.stop());
     this.mediaStream = undefined;
-    this.preview.nativeElement.srcObject = null;
+    this.peer?.close();
+    this.peer = undefined;
+    this.isBroadcaster = false;
     this.isStreaming = false;
+    this.hasVideo = false;
+    if (this.video) this.video.nativeElement.srcObject = null;
+    this.send({ type: 'stream-stopped' });
+    this.message = 'Transmissão encerrada.';
+  }
+
+  private clearViewer(): void {
+    if (this.isBroadcaster) return;
+    this.peer?.close();
+    this.peer = undefined;
+    this.isStreaming = false;
+    this.hasVideo = false;
+    if (this.video) this.video.nativeElement.srcObject = null;
+    this.message = 'A transmissão foi encerrada.';
+  }
+
+  private send(data: object): void {
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(data));
+  }
+
+  ngOnDestroy(): void {
+    this.mediaStream?.getTracks().forEach(track => track.stop());
+    this.peer?.close();
+    this.socket?.close();
   }
 }
 
