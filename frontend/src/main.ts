@@ -1,3 +1,4 @@
+import { provideZonelessChangeDetection } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { Component, ElementRef, ViewChild, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
@@ -200,4 +201,4 @@ export class AppComponent implements OnDestroy {
   }
 }
 
-bootstrapApplication(AppComponent).catch(console.error);
+bootstrapApplication(AppComponent, { providers: [provideZonelessChangeDetection()] }).catch(console.error);
