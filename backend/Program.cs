@@ -99,7 +99,6 @@ static async Task HandleSignalAsync(string senderId, string rawMessage, Concurre
 
     if (type == "start-stream")
     {
-        // Um navegador só pode possuir uma live ativa. Remove registro órfão anterior, se houver.
         foreach (var oldStream in streams.Values.Where(x => x.BroadcasterId == senderId).ToArray())
         {
             streams.TryRemove(oldStream.StreamId, out _);
@@ -176,12 +175,8 @@ static Task SendToAsync(ConcurrentDictionary<string, ClientSession> sessions, st
     return Task.CompletedTask;
 }
 
-static readonly JsonSerializerOptions SocketJsonOptions = new()
-{
-    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-};
-
-static Task SendAsync(WebSocket socket, object data) => SendTextAsync(socket, JsonSerializer.Serialize(data, SocketJsonOptions));
+static Task SendAsync(WebSocket socket, object data) =>
+    SendTextAsync(socket, JsonSerializer.Serialize(data, SocketJson.Options));
 
 static Task SendTextAsync(WebSocket socket, string text)
 {
@@ -192,3 +187,11 @@ static Task SendTextAsync(WebSocket socket, string text)
 record LoginRequest(string Password);
 record ClientSession(string Id, WebSocket Socket);
 record StreamInfo(string StreamId, string BroadcasterId, string Name);
+
+static class SocketJson
+{
+    public static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+}
