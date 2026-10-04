@@ -46,8 +46,10 @@ app.Map("/ws/signaling", async context =>
     var socket = await context.WebSockets.AcceptWebSocketAsync();
     var id = Guid.NewGuid().ToString("N");
     sessions[id] = new ClientSession(id, socket);
+    Console.WriteLine($"[WS] Cliente conectado: {id} | clientes={sessions.Count}");
 
     await SendAsync(socket, new { type = "connected", id, streams = streams.Values.ToArray() });
+    Console.WriteLine($"[WS] connected enviado para {id} | lives={streams.Count}");
 
     var buffer = new byte[64 * 1024];
 
@@ -57,20 +59,38 @@ app.Map("/ws/signaling", async context =>
         {
             var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
             if (result.MessageType == WebSocketMessageType.Close) break;
+            if (result.MessageType != WebSocketMessageType.Text) continue;
 
             var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            Console.WriteLine($"[WS] Mensagem de {id}: {GetSignalType(message)}");
             await HandleSignalAsync(id, message, sessions, streams);
         }
     }
-    catch (OperationCanceledException) { }
-    catch (WebSocketException) { }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine($"[WS] Conexão cancelada: {id}");
+    }
+    catch (WebSocketException ex)
+    {
+        Console.WriteLine($"[WS] Erro WebSocket {id}: {ex.Message}");
+    }
+    catch (JsonException ex)
+    {
+        Console.WriteLine($"[WS] JSON inválido de {id}: {ex.Message}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[WS] Erro inesperado {id}: {ex}");
+    }
     finally
     {
         sessions.TryRemove(id, out _);
+        Console.WriteLine($"[WS] Cliente desconectado: {id} | clientes={sessions.Count}");
 
         foreach (var stream in streams.Values.Where(x => x.BroadcasterId == id).ToArray())
         {
             streams.TryRemove(stream.StreamId, out _);
+            Console.WriteLine($"[STREAM] Removida por desconexão: {stream.StreamId} ({stream.Name})");
             await BroadcastAsync(sessions, new { type = "stream-stopped", streamId = stream.StreamId, broadcasterId = id });
         }
 
@@ -91,7 +111,11 @@ static async Task HandleSignalAsync(
 {
     using var document = JsonDocument.Parse(rawMessage);
     var root = document.RootElement;
-    if (!root.TryGetProperty("type", out var typeElement)) return;
+    if (!root.TryGetProperty("type", out var typeElement))
+    {
+        Console.WriteLine($"[WS] Mensagem sem type recebida de {senderId}");
+        return;
+    }
 
     var type = typeElement.GetString();
 
@@ -103,8 +127,10 @@ static async Task HandleSignalAsync(
             : $"Live {streams.Count + 1}";
         var stream = new StreamInfo(streamId, senderId, name);
         streams[streamId] = stream;
+        Console.WriteLine($"[STREAM] Criada: {streamId} | nome={name} | broadcaster={senderId}");
         await BroadcastAsync(sessions, new { type = "stream-started", stream });
         await SendToAsync(sessions, senderId, new { type = "stream-created", stream });
+        Console.WriteLine($"[STREAM] stream-created enviado para {senderId}");
         return;
     }
 
@@ -114,6 +140,7 @@ static async Task HandleSignalAsync(
         if (streamId is not null && streams.TryGetValue(streamId, out var stream) && stream.BroadcasterId == senderId)
         {
             streams.TryRemove(streamId, out _);
+            Console.WriteLine($"[STREAM] Encerrada: {streamId} | broadcaster={senderId}");
             await BroadcastAsync(sessions, new { type = "stream-stopped", streamId, broadcasterId = senderId });
         }
         return;
@@ -123,7 +150,14 @@ static async Task HandleSignalAsync(
     {
         var streamId = watchStreamIdElement.GetString();
         if (streamId is not null && streams.TryGetValue(streamId, out var stream))
+        {
+            Console.WriteLine($"[WEBRTC] watch | stream={streamId} | viewer={senderId} | broadcaster={stream.BroadcasterId}");
             await SendToAsync(sessions, stream.BroadcasterId, new { type = "watch", streamId, viewerId = senderId });
+        }
+        else
+        {
+            Console.WriteLine($"[WEBRTC] watch ignorado: stream inexistente {streamId}");
+        }
         return;
     }
 
@@ -132,12 +166,31 @@ static async Task HandleSignalAsync(
         var targetId = targetElement.GetString();
         if (!string.IsNullOrWhiteSpace(targetId))
         {
+            Console.WriteLine($"[WEBRTC] {type} | de={senderId} | para={targetId}");
             var payload = new Dictionary<string, object?>();
             foreach (var property in root.EnumerateObject())
                 payload[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
             payload["senderId"] = senderId;
             await SendToAsync(sessions, targetId, payload);
         }
+        return;
+    }
+
+    Console.WriteLine($"[WS] Tipo não tratado: {type} | sender={senderId}");
+}
+
+static string GetSignalType(string rawMessage)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(rawMessage);
+        return document.RootElement.TryGetProperty("type", out var type)
+            ? type.GetString() ?? "(type nulo)"
+            : "(sem type)";
+    }
+    catch
+    {
+        return "(JSON inválido)";
     }
 }
 
@@ -149,9 +202,11 @@ static async Task BroadcastAsync(ConcurrentDictionary<string, ClientSession> ses
 
 static Task SendToAsync(ConcurrentDictionary<string, ClientSession> sessions, string id, object data)
 {
-    return sessions.TryGetValue(id, out var session) && session.Socket.State == WebSocketState.Open
-        ? SendAsync(session.Socket, data)
-        : Task.CompletedTask;
+    if (sessions.TryGetValue(id, out var session) && session.Socket.State == WebSocketState.Open)
+        return SendAsync(session.Socket, data);
+
+    Console.WriteLine($"[WS] Destino indisponível: {id}");
+    return Task.CompletedTask;
 }
 
 static Task SendAsync(WebSocket socket, object data) =>
