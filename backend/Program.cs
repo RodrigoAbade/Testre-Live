@@ -66,22 +66,10 @@ app.Map("/ws/signaling", async context =>
             await HandleSignalAsync(id, message, sessions, streams);
         }
     }
-    catch (OperationCanceledException)
-    {
-        Console.WriteLine($"[WS] Conexão cancelada: {id}");
-    }
-    catch (WebSocketException ex)
-    {
-        Console.WriteLine($"[WS] Erro WebSocket {id}: {ex.Message}");
-    }
-    catch (JsonException ex)
-    {
-        Console.WriteLine($"[WS] JSON inválido de {id}: {ex.Message}");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[WS] Erro inesperado {id}: {ex}");
-    }
+    catch (OperationCanceledException) { Console.WriteLine($"[WS] Conexão cancelada: {id}"); }
+    catch (WebSocketException ex) { Console.WriteLine($"[WS] Erro WebSocket {id}: {ex.Message}"); }
+    catch (JsonException ex) { Console.WriteLine($"[WS] JSON inválido de {id}: {ex.Message}"); }
+    catch (Exception ex) { Console.WriteLine($"[WS] Erro inesperado {id}: {ex}"); }
     finally
     {
         sessions.TryRemove(id, out _);
@@ -100,31 +88,26 @@ app.Map("/ws/signaling", async context =>
 });
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", clients = sessions.Count, streams = streams.Count }));
-
 app.Run("http://0.0.0.0:8080");
 
-static async Task HandleSignalAsync(
-    string senderId,
-    string rawMessage,
-    ConcurrentDictionary<string, ClientSession> sessions,
-    ConcurrentDictionary<string, StreamInfo> streams)
+static async Task HandleSignalAsync(string senderId, string rawMessage, ConcurrentDictionary<string, ClientSession> sessions, ConcurrentDictionary<string, StreamInfo> streams)
 {
     using var document = JsonDocument.Parse(rawMessage);
     var root = document.RootElement;
-    if (!root.TryGetProperty("type", out var typeElement))
-    {
-        Console.WriteLine($"[WS] Mensagem sem type recebida de {senderId}");
-        return;
-    }
-
+    if (!root.TryGetProperty("type", out var typeElement)) { Console.WriteLine($"[WS] Mensagem sem type recebida de {senderId}"); return; }
     var type = typeElement.GetString();
 
     if (type == "start-stream")
     {
+        // Um navegador só pode possuir uma live ativa. Remove registro órfão anterior, se houver.
+        foreach (var oldStream in streams.Values.Where(x => x.BroadcasterId == senderId).ToArray())
+        {
+            streams.TryRemove(oldStream.StreamId, out _);
+            await BroadcastAsync(sessions, new { type = "stream-stopped", streamId = oldStream.StreamId, broadcasterId = senderId });
+        }
+
         var streamId = Guid.NewGuid().ToString("N");
-        var name = root.TryGetProperty("name", out var nameElement) && !string.IsNullOrWhiteSpace(nameElement.GetString())
-            ? nameElement.GetString()!
-            : $"Live {streams.Count + 1}";
+        var name = root.TryGetProperty("name", out var nameElement) && !string.IsNullOrWhiteSpace(nameElement.GetString()) ? nameElement.GetString()! : $"Live {streams.Count + 1}";
         var stream = new StreamInfo(streamId, senderId, name);
         streams[streamId] = stream;
         Console.WriteLine($"[STREAM] Criada: {streamId} | nome={name} | broadcaster={senderId}");
@@ -154,10 +137,7 @@ static async Task HandleSignalAsync(
             Console.WriteLine($"[WEBRTC] watch | stream={streamId} | viewer={senderId} | broadcaster={stream.BroadcasterId}");
             await SendToAsync(sessions, stream.BroadcasterId, new { type = "watch", streamId, viewerId = senderId });
         }
-        else
-        {
-            Console.WriteLine($"[WEBRTC] watch ignorado: stream inexistente {streamId}");
-        }
+        else Console.WriteLine($"[WEBRTC] watch ignorado: stream inexistente {streamId}");
         return;
     }
 
@@ -168,8 +148,7 @@ static async Task HandleSignalAsync(
         {
             Console.WriteLine($"[WEBRTC] {type} | de={senderId} | para={targetId}");
             var payload = new Dictionary<string, object?>();
-            foreach (var property in root.EnumerateObject())
-                payload[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
+            foreach (var property in root.EnumerateObject()) payload[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
             payload["senderId"] = senderId;
             await SendToAsync(sessions, targetId, payload);
         }
@@ -181,36 +160,28 @@ static async Task HandleSignalAsync(
 
 static string GetSignalType(string rawMessage)
 {
-    try
-    {
-        using var document = JsonDocument.Parse(rawMessage);
-        return document.RootElement.TryGetProperty("type", out var type)
-            ? type.GetString() ?? "(type nulo)"
-            : "(sem type)";
-    }
-    catch
-    {
-        return "(JSON inválido)";
-    }
+    try { using var document = JsonDocument.Parse(rawMessage); return document.RootElement.TryGetProperty("type", out var type) ? type.GetString() ?? "(type nulo)" : "(sem type)"; }
+    catch { return "(JSON inválido)"; }
 }
 
 static async Task BroadcastAsync(ConcurrentDictionary<string, ClientSession> sessions, object data)
 {
-    foreach (var session in sessions.Values.Where(x => x.Socket.State == WebSocketState.Open))
-        await SendAsync(session.Socket, data);
+    foreach (var session in sessions.Values.Where(x => x.Socket.State == WebSocketState.Open)) await SendAsync(session.Socket, data);
 }
 
 static Task SendToAsync(ConcurrentDictionary<string, ClientSession> sessions, string id, object data)
 {
-    if (sessions.TryGetValue(id, out var session) && session.Socket.State == WebSocketState.Open)
-        return SendAsync(session.Socket, data);
-
+    if (sessions.TryGetValue(id, out var session) && session.Socket.State == WebSocketState.Open) return SendAsync(session.Socket, data);
     Console.WriteLine($"[WS] Destino indisponível: {id}");
     return Task.CompletedTask;
 }
 
-static Task SendAsync(WebSocket socket, object data) =>
-    SendTextAsync(socket, JsonSerializer.Serialize(data));
+static readonly JsonSerializerOptions SocketJsonOptions = new()
+{
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+};
+
+static Task SendAsync(WebSocket socket, object data) => SendTextAsync(socket, JsonSerializer.Serialize(data, SocketJsonOptions));
 
 static Task SendTextAsync(WebSocket socket, string text)
 {
